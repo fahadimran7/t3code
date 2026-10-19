@@ -3644,6 +3644,11 @@ export default function ChatView(props: ChatViewProps) {
     useRightPanelStore.getState().open(activeThreadRef, "files");
   };
   const addFilesSurfaceStable = useStableCallback(addFilesSurface);
+  const addPromptsSurface = () => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().open(activeThreadRef, "prompts");
+  };
+  const addPromptsSurfaceStable = useStableCallback(addPromptsSurface);
   const supportsThreadPullRequests =
     serverConfig?.environment.capabilities.threadPullRequests === true;
   const visiblePullRequests = visibleThreadPullRequests(
@@ -8553,6 +8558,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequest={addPullRequestSurfaceStable}
           onAddPullRequests={addPullRequestsSurfaceStable}
           onAddDevice={addDeviceSurfaceStable}
+          onAddPrompts={addPromptsSurfaceStable}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
           diffAvailable={isServerThread && isGitRepo}
@@ -8608,6 +8614,7 @@ export default function ChatView(props: ChatViewProps) {
             onAddPullRequest={addPullRequestSurfaceStable}
             onAddPullRequests={addPullRequestsSurfaceStable}
             onAddDevice={addDeviceSurfaceStable}
+            onAddPrompts={addPromptsSurfaceStable}
             browserAvailable={canOperatePreview && browserAvailable}
             terminalAvailable={activeProject !== null && canOperateTerminal}
             diffAvailable={isServerThread && isGitRepo}

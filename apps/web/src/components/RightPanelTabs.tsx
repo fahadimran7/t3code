@@ -26,6 +26,7 @@ import { restrictToFirstScrollableAncestor, restrictToHorizontalAxis } from "@dn
 import { horizontalListSortingStrategy, SortableContext, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
+  Bookmark,
   Smartphone,
   ChevronDown,
   ChevronLeft,
@@ -137,6 +138,7 @@ interface RightPanelTabsProps {
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddDevice: () => void;
+  onAddPrompts: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
@@ -172,6 +174,7 @@ const SURFACE_DISABLED_REASONS = {
   pullRequest: "This thread's branch has no pull request yet.",
   pullRequests: "No linked pull requests are available for this thread.",
   device: "Devices are only available from a thread.",
+  prompts: "Prompts are only available from a thread.",
 } as const;
 
 const LAUNCHER_SHORTCUT_BLOCKING_LAYERS = [
@@ -193,6 +196,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
   pullRequest: "No pull request on this branch yet.",
   pullRequests: "No linked pull requests available.",
   device: "Available from a thread.",
+  prompts: "Available from a thread.",
 } as const;
 
 type TabContextMenuAction =
@@ -314,6 +318,7 @@ function RightPanelEmptyState(props: {
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddDevice: () => void;
+  onAddPrompts: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
@@ -381,6 +386,14 @@ function RightPanelEmptyState(props: {
       available: props.deviceAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.device,
       onClick: props.onAddDevice,
+    },
+    {
+      label: "Prompts",
+      icon: Bookmark,
+      shortcut: "S",
+      available: true,
+      disabledReason: SURFACE_UNAVAILABLE_HINTS.prompts,
+      onClick: props.onAddPrompts,
     },
   ] as const;
 
@@ -566,6 +579,8 @@ function surfaceTitle(
       return "Pull requests";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
+    case "prompts":
+      return "Prompts";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -662,6 +677,8 @@ function SurfaceIcon({
       ) : (
         <Smartphone className="size-3 shrink-0" />
       );
+    case "prompts":
+      return <Bookmark className="size-3 shrink-0" />;
   }
 }
 
@@ -1081,6 +1098,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       disabledReason: SURFACE_DISABLED_REASONS.device,
       onClick: props.onAddDevice,
     },
+    {
+      label: "Prompts",
+      icon: Bookmark,
+      shortcut: "S",
+      available: true,
+      disabledReason: SURFACE_DISABLED_REASONS.prompts,
+      onClick: props.onAddPrompts,
+    },
   ] as const;
 
   const handleAddSurfaceMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -1454,6 +1479,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddPullRequest={props.onAddPullRequest}
             onAddPullRequests={props.onAddPullRequests}
             onAddDevice={props.onAddDevice}
+            onAddPrompts={props.onAddPrompts}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}

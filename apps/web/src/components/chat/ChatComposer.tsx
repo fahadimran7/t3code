@@ -132,7 +132,9 @@ import {
 import {
   MAX_STASH_ENTRIES,
   partitionStashAttachments,
+  setPromptStashActionHandler,
   usePromptStashStore,
+  type PromptStashAction,
   type PromptStashEntry,
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
@@ -4263,7 +4265,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         title: "Stashed files belong to another environment",
         description: "Restore this prompt in the environment that received its files.",
       });
-      return;
+      return false;
     }
     setIsStashMenuOpen(false);
 
@@ -4289,11 +4291,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       isRevertingCheckpointRef.current ||
       composerTargetKey(composerDraftTarget) !== composerDraftTargetKeyRef.current
     ) {
-      return;
+      return false;
     }
 
     const { entry, durable } = takeStashEntry(menuEntry.id);
-    if (!entry) return;
+    if (!entry) return false;
     if (!durable) {
       toastManager.add({
         type: "warning",
@@ -4514,6 +4516,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         composerEditorRef.current?.focusAtEnd();
       });
     }
+    return true;
   };
   const restoreStashEntryStable = useStableCallback(restoreStashEntry);
 
@@ -4542,6 +4545,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
   };
   const deleteStashEntryStable = useStableCallback(deleteStashEntry);
+
+  const runStashAction = async (entry: PromptStashEntry, action: PromptStashAction) => {
+    if (action === "delete") {
+      deleteStashEntry(entry);
+      return true;
+    }
+    // Restoring appends to the draft, so sending over one would send both.
+    const hadDraft =
+      promptRef.current.trim().length > 0 ||
+      composerImagesRef.current.length > 0 ||
+      composerFilesRef.current.length > 0;
+    const restored = await restoreStashEntry(entry);
+    if (!restored || action === "restore") return restored;
+    if (hadDraft) {
+      toastManager.add({
+        type: "info",
+        title: "Added to the composer",
+        description: "The composer already had a draft, so nothing was sent.",
+      });
+      return true;
+    }
+    // Restored images land in the draft store; let the composer render them before it snapshots.
+    window.requestAnimationFrame(() => submitComposerStable());
+    return true;
+  };
+  const runStashActionStable = useStableCallback(runStashAction);
+  useEffect(
+    () => setPromptStashActionHandler(composerDraftTarget, runStashActionStable),
+    [composerDraftTarget, runStashActionStable],
+  );
 
   const stashCurrentPrompt = async () => {
     // Stashing clears the draft. A pasted attachment still downloading would then land in the

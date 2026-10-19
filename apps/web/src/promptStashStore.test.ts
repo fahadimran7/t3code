@@ -5,6 +5,8 @@ import {
   serializeAssistantCitation,
 } from "@t3tools/shared/assistantCitations";
 
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+
 import { removeLocalStorageItem } from "./hooks/useLocalStorage";
 
 import {
@@ -12,6 +14,8 @@ import {
   PROMPT_STASH_STORAGE_KEY,
   MAX_STASH_ENTRY_ATTACHMENT_CHARS,
   partitionStashAttachments,
+  runPromptStashAction,
+  setPromptStashActionHandler,
   usePromptStashStore,
   writePromptStashStorageForTest,
   type PromptStashEntry,
@@ -314,5 +318,33 @@ describe("prompt stash context records", () => {
     });
     const taken = usePromptStashStore.getState().takeEntry("entry-records");
     expect(taken.entry?.records).toEqual(records);
+  });
+});
+
+describe("prompt stash actions", () => {
+  const threadA = scopeThreadRef(EnvironmentId.make("env-1"), ThreadId.make("thread-A"));
+  const threadB = scopeThreadRef(EnvironmentId.make("env-1"), ThreadId.make("thread-B"));
+
+  it("reaches only the composer mounted for the target, and none once it unmounts", async () => {
+    const calls: string[] = [];
+    const unregister = setPromptStashActionHandler(threadA, async (entry, action) => {
+      calls.push(`${entry.id}:${action}`);
+      return true;
+    });
+
+    expect(await runPromptStashAction(threadA, makeEntry({ id: "a" }), "send")).toBe(true);
+    expect(await runPromptStashAction(threadB, makeEntry({ id: "b" }), "send")).toBe(false);
+    unregister();
+    expect(await runPromptStashAction(threadA, makeEntry({ id: "c" }), "restore")).toBe(false);
+    expect(calls).toEqual(["a:send"]);
+  });
+
+  it("keeps a newer composer's handler when an older one unregisters late", async () => {
+    const unregisterOld = setPromptStashActionHandler(threadA, async () => false);
+    const unregisterNew = setPromptStashActionHandler(threadA, async () => true);
+    unregisterOld();
+
+    expect(await runPromptStashAction(threadA, makeEntry({ id: "a" }), "restore")).toBe(true);
+    unregisterNew();
   });
 });

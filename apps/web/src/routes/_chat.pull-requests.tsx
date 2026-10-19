@@ -1684,6 +1684,7 @@ function PullRequestsRouteView() {
             onAddPullRequest={() => undefined}
             onAddPullRequests={() => undefined}
             onAddDevice={() => undefined}
+            onAddPrompts={() => undefined}
             browserAvailable={false}
             terminalAvailable={false}
             diffAvailable={false}

@@ -3,6 +3,8 @@ import * as Schema from "effect/Schema";
 import { create } from "zustand";
 
 import {
+  type ComposerThreadTarget,
+  composerTargetKey,
   PersistedComposerFileAttachment,
   PersistedComposerImageAttachment,
 } from "./composerDraftStore";
@@ -224,6 +226,40 @@ export const usePromptStashStore = create<PromptStashStoreState>()((set, get) =>
   if (persisted) {
     usePromptStashStore.setState({ entries: persisted });
   }
+}
+
+export type PromptStashAction = "restore" | "send" | "delete";
+type PromptStashActionHandler = (
+  entry: PromptStashEntry,
+  action: PromptStashAction,
+) => Promise<boolean>;
+
+/**
+ * Restoring needs the mounted composer's live draft (it appends to it and re-verifies uploads
+ * against its environment) and deleting releases uploads it tracks, so surfaces outside the
+ * composer hand entries to it here.
+ */
+const actionHandlers = new Map<string, PromptStashActionHandler>();
+
+export function setPromptStashActionHandler(
+  target: ComposerThreadTarget,
+  handler: PromptStashActionHandler,
+): () => void {
+  const key = composerTargetKey(target);
+  actionHandlers.set(key, handler);
+  return () => {
+    if (actionHandlers.get(key) === handler) actionHandlers.delete(key);
+  };
+}
+
+/** False when no composer is mounted for the target or it declined the entry. */
+export async function runPromptStashAction(
+  target: ComposerThreadTarget,
+  entry: PromptStashEntry,
+  action: PromptStashAction,
+): Promise<boolean> {
+  const handler = actionHandlers.get(composerTargetKey(target));
+  return handler ? handler(entry, action) : false;
 }
 
 export function writePromptStashStorageForTest(raw: string): void {

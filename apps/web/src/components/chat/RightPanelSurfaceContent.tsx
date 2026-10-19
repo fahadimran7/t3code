@@ -31,6 +31,9 @@ const DevicePanel = lazy(() =>
   import("../device/DevicePanel").then((module) => ({ default: module.DevicePanel })),
 );
 const FilePreviewPanel = lazy(() => import("../files/FilePreviewPanel"));
+const PromptsPanel = lazy(() =>
+  import("../prompts/PromptsPanel").then((module) => ({ default: module.PromptsPanel })),
+);
 
 export type RightPanelTerminalProps = Omit<
   PersistentThreadTerminalPanelProps,
@@ -176,6 +179,12 @@ export function RightPanelSurfaceContent(props: {
               useRightPanelStore.getState().show(threadRef);
             }}
           />
+        </Suspense>
+      );
+    case "prompts":
+      return (
+        <Suspense fallback={null}>
+          <PromptsPanel composerDraftTarget={props.composerDraftTarget} />
         </Suspense>
       );
     case "files":
