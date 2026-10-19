@@ -16,6 +16,7 @@ import {
   FolderIcon,
   MessagesSquareIcon,
   PackageIcon,
+  PinIcon,
   SettingsIcon,
   UserRoundIcon,
   type LucideIcon,
@@ -23,6 +24,7 @@ import {
 import { memo, useLayoutEffect, useRef } from "react";
 
 import { type ComposerSlashCommand, type ComposerTriggerKind } from "../../composer-logic";
+import { type PromptTemplate } from "../../promptTemplateStore";
 import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
 import { Command, CommandGroup, CommandItem, CommandList } from "../ui/command";
@@ -59,6 +61,13 @@ export type ComposerCommandItem =
       type: "skill";
       provider: ProviderDriverKind;
       skill: ServerProviderSkill;
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
+      type: "prompt-template";
+      template: PromptTemplate;
       label: string;
       description: string;
     }
@@ -199,6 +208,9 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
       ) : null}
       {props.item.type === "thread" ? (
         <MessagesSquareIcon aria-hidden="true" className="size-4 shrink-0 text-secondary-label" />
+      ) : null}
+      {props.item.type === "prompt-template" ? (
+        <PinIcon aria-label="Template" className="size-4 shrink-0 text-secondary-label" />
       ) : null}
       {pullRequestPresentation ? (
         <pullRequestPresentation.Icon

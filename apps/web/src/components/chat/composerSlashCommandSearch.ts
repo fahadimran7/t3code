@@ -9,8 +9,39 @@ import { scoreProviderSkill } from "../../providerSkillSearch";
 
 type SlashSearchItem = Extract<
   ComposerCommandItem,
-  { type: "slash-command" | "provider-slash-command" | "skill" }
+  { type: "slash-command" | "provider-slash-command" | "skill" | "prompt-template" }
 >;
+
+/** Typing `/t:` narrows the slash menu to prompt templates, like `/skill:` does for skills. */
+const PROMPT_TEMPLATE_QUERY_PREFIX = "t:";
+
+function scorePromptTemplateItem(
+  item: Extract<SlashSearchItem, { type: "prompt-template" }>,
+  query: string,
+): number | null {
+  if (!query) return 0;
+  const scores = [
+    scoreQueryMatch({
+      value: item.label.toLowerCase(),
+      query,
+      exactBase: 0,
+      prefixBase: 2,
+      boundaryBase: 4,
+      includesBase: 6,
+      fuzzyBase: 100,
+    }),
+    // No fuzzy match on the body: across a long prompt it would match almost any query.
+    scoreQueryMatch({
+      value: item.template.prompt.toLowerCase(),
+      query,
+      exactBase: 20,
+      prefixBase: 22,
+      boundaryBase: 24,
+      includesBase: 26,
+    }),
+  ].filter((score): score is number => score !== null);
+  return scores.length === 0 ? null : Math.min(...scores);
+}
 
 /**
  * A provider expands a slash command only when it opens the whole message;
@@ -28,6 +59,14 @@ export function slashCommandItemsForPromptPosition(
 }
 
 function scoreSlashCommandItem(item: SlashSearchItem, query: string): number | null {
+  if (query.startsWith(PROMPT_TEMPLATE_QUERY_PREFIX)) {
+    return item.type === "prompt-template"
+      ? scorePromptTemplateItem(item, query.slice(PROMPT_TEMPLATE_QUERY_PREFIX.length).trim())
+      : null;
+  }
+  if (item.type === "prompt-template") {
+    return scorePromptTemplateItem(item, query);
+  }
   if (item.type === "skill") {
     if (query === "skill") {
       return 0;
@@ -103,7 +142,9 @@ export function searchSlashCommandItems(
             ? `0\u0000${item.command}`
             : item.type === "provider-slash-command"
               ? `1\u0000${item.command.name}\u0000${item.provider}`
-              : `2\u0000${item.skill.name}\u0000${item.provider}`,
+              : item.type === "skill"
+                ? `2\u0000${item.skill.name}\u0000${item.provider}`
+                : `3\u0000${item.label}\u0000${item.id}`,
       },
       Number.POSITIVE_INFINITY,
     );

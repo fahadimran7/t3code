@@ -7,6 +7,49 @@ import {
   slashCommandItemsForPromptPosition,
 } from "./composerSlashCommandSearch";
 
+function templateItem(id: string, prompt: string) {
+  const label = prompt.split("\n", 1)[0] ?? "";
+  return {
+    id: `prompt-template:${id}`,
+    type: "prompt-template" as const,
+    template: { id, createdAt: "2026-10-01T00:00:00.000Z", prompt, attachments: [] },
+    label,
+    description: prompt.slice(label.length).trim(),
+  };
+}
+
+describe("searchSlashCommandItems with prompt templates", () => {
+  const items = [
+    {
+      id: "slash:model",
+      type: "slash-command" as const,
+      command: "model" as const,
+      label: "/model",
+      description: "Switch response model for this thread",
+    },
+    templateItem("review", "Review this diff\nLook for missing tests and edge cases."),
+    templateItem("pr", "Write a PR description\nSummarize the change so it is easy to review."),
+  ];
+
+  it("matches templates by words anywhere in the body, ranking title matches first", () => {
+    expect(searchSlashCommandItems(items, "edge cases").map((item) => item.id)).toEqual([
+      "prompt-template:review",
+    ]);
+    expect(searchSlashCommandItems(items, "review").map((item) => item.id)).toEqual([
+      "prompt-template:review",
+      "prompt-template:pr",
+    ]);
+  });
+
+  it("narrows to templates with the t: prefix", () => {
+    expect(searchSlashCommandItems(items, "t:").map((item) => item.id)).toEqual([
+      "prompt-template:review",
+      "prompt-template:pr",
+    ]);
+    expect(searchSlashCommandItems(items, "t:model").map((item) => item.id)).toEqual([]);
+  });
+});
+
 describe("searchSlashCommandItems", () => {
   const claudeDriver = ProviderDriverKind.make("claudeAgent");
 

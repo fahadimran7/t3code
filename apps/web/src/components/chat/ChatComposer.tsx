@@ -137,6 +137,14 @@ import {
   type PromptStashAction,
   type PromptStashEntry,
 } from "../../promptStashStore";
+import {
+  promptTemplateTitle,
+  setPromptTemplateActionHandler,
+  sortPromptTemplatesByRecentUse,
+  usePromptTemplateStore,
+  type PromptTemplate,
+  type PromptTemplateAction,
+} from "../../promptTemplateStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
 import { useComposerMenuState } from "./useComposerMenuState";
@@ -2616,6 +2624,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ? []
       : composerPullRequestsFromLinks(threadPullRequests ?? [], pullRequestProjectId);
 
+  const promptTemplates = usePromptTemplateStore((state) => state.templates);
   const composerMenuItems = ((): ComposerCommandItem[] => {
     if (!composerTrigger) return [];
     if (composerTrigger.kind === "path") {
@@ -2694,8 +2703,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const visibleProviderSlashCommandItems = providerSlashCommandItems.filter(
         (item) => item.command.name !== "compact" || compactSlashCommandAvailable,
       );
+      const promptTemplateItems = sortPromptTemplatesByRecentUse(promptTemplates).map(
+        (template) => {
+          const title = promptTemplateTitle(template);
+          return {
+            id: `prompt-template:${template.id}`,
+            type: "prompt-template" as const,
+            template,
+            label: title,
+            description: template.prompt.trim().slice(title.length).trim().replace(/\s+/g, " "),
+          };
+        },
+      );
       const slashCommandItems = slashCommandItemsForPromptPosition(
-        [...builtInSlashCommandItems, ...visibleProviderSlashCommandItems, ...skillItems],
+        [
+          ...builtInSlashCommandItems,
+          ...visibleProviderSlashCommandItems,
+          ...skillItems,
+          ...promptTemplateItems,
+        ],
         composerTrigger.rangeStart === 0,
       );
       return searchSlashCommandItems(slashCommandItems, query);
@@ -3760,6 +3786,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     };
   };
 
+  /** Template images get fresh ids so inserting a template again never collides with an earlier copy. */
+  const addPromptTemplateImages = (template: PromptTemplate) => {
+    if (template.attachments.length > 0) {
+      const capacity = remainingComposerAttachmentSlots(
+        composerImagesRef.current.length + composerFilesRef.current.length,
+        pendingThreadImportsRef.current.get(composerTargetKey(composerDraftTarget)) ?? 0,
+      );
+      const images = hydrateImagesFromPersisted(
+        template.attachments.map((attachment) => ({ ...attachment, id: randomUUID() })),
+      );
+      addComposerDraftImages(composerDraftTarget, images.slice(0, capacity));
+      if (images.length > capacity) {
+        toastManager.add({
+          type: "warning",
+          title: "Some template images were not added",
+          description: `The composer is at its ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS}-attachment limit.`,
+        });
+      }
+    }
+    // Using a template keeps it; recording the use orders the slash menu and the Prompts list.
+    usePromptTemplateStore.getState().markTemplateUsed(template.id, new Date().toISOString());
+  };
+
   const { onUsageLimitsCommand } = props;
   const onSelectComposerItem = (item: ComposerCommandItem) => {
     if (composerSelectLockRef.current) return;
@@ -3829,6 +3878,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       if (applied) {
         setComposerHighlightedItemId(null);
+      }
+      return;
+    }
+    if (item.type === "prompt-template") {
+      const applied = applyPromptReplacement(
+        trigger.rangeStart,
+        trigger.rangeEnd,
+        item.template.prompt,
+        { expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd) },
+      );
+      if (applied) {
+        setComposerHighlightedItemId(null);
+        addPromptTemplateImages(item.template);
       }
       return;
     }
@@ -5782,6 +5844,40 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     );
   };
   const insertComposerTextStable = useStableCallback(insertComposerText);
+
+  const insertPromptTemplate = (template: PromptTemplate) => {
+    const inserted =
+      template.prompt.length === 0 ||
+      insertComposerText(template.prompt, "cursor", { ensureLeadingBoundary: true });
+    if (inserted) addPromptTemplateImages(template);
+    return inserted;
+  };
+
+  const runPromptTemplateAction = (template: PromptTemplate, action: PromptTemplateAction) => {
+    // Inserting adds to the draft, so sending over one would send both.
+    const hadDraft =
+      promptRef.current.trim().length > 0 ||
+      composerImagesRef.current.length > 0 ||
+      composerFilesRef.current.length > 0;
+    if (!insertPromptTemplate(template)) return false;
+    if (action === "insert") return true;
+    if (hadDraft) {
+      toastManager.add({
+        type: "info",
+        title: "Added to the composer",
+        description: "The composer already had a draft, so nothing was sent.",
+      });
+      return true;
+    }
+    // Inserted images land in the draft store; let the composer render them before it snapshots.
+    window.requestAnimationFrame(() => submitComposerStable());
+    return true;
+  };
+  const runPromptTemplateActionStable = useStableCallback(runPromptTemplateAction);
+  useEffect(
+    () => setPromptTemplateActionHandler(composerDraftTarget, runPromptTemplateActionStable),
+    [composerDraftTarget, runPromptTemplateActionStable],
+  );
 
   const insertComposerTextAtEnd: ChatComposerHandle["insertTextAtEnd"] = (text, options) => {
     const inserted = insertComposerText(text, "end", options);
