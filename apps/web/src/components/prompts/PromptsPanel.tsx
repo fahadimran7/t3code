@@ -1,9 +1,32 @@
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import {
+  fileAttachmentTooLargeMessage,
+  formatAttachmentSize,
+} from "@t3tools/client-runtime/state/attachments";
+import {
+  type EnvironmentId,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
-import { BookmarkIcon, CornerDownLeftIcon, ImagePlusIcon, Trash2Icon, XIcon } from "lucide-react";
+import { BookmarkIcon, CornerDownLeftIcon, PaperclipIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 
-import type { DraftId, PersistedComposerImageAttachment } from "../../composerDraftStore";
+import type {
+  ComposerFileAttachment,
+  DraftId,
+  PersistedComposerFileAttachment,
+  PersistedComposerImageAttachment,
+} from "../../composerDraftStore";
+import { useTheme } from "../../hooks/useTheme";
+import {
+  readAttachmentUpload,
+  releaseAttachmentUpload,
+  retryAttachmentUpload,
+  startAttachmentUpload,
+  useAttachmentUploadStore,
+} from "../../lib/attachmentUploadQueue";
+import { formatAttachmentUploadProgress } from "../../lib/attachmentUploadState";
 import { compressImageForStash } from "../../lib/imageCompression";
 import { cn, isMacPlatform, randomUUID } from "../../lib/utils";
 import {
@@ -14,10 +37,19 @@ import {
   type PromptStashAction,
   type PromptStashEntry,
 } from "../../promptStashStore";
+import { environmentServerConfigsAtom } from "../../state/server";
+import { videoMimeType } from "../../types";
+import {
+  classifyComposerAttachmentFile,
+  fileAttachmentStagingLimit,
+  normalizeComposerImageFileMimeType,
+} from "../chat/composerAttachmentFiles";
 import { ComposerSurface } from "../chat/ComposerSurface";
+import { PierreEntryIcon } from "../chat/PierreEntryIcon";
 import { RelativeTime } from "../RelativeTime";
 import { Button } from "../ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
+import { RefreshIcon } from "../ui/refresh-icon";
 import { ScrollArea } from "../ui/scroll-area";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -28,14 +60,16 @@ interface DraftImage {
   previewUrl: string;
 }
 
-const imageFilesOf = (files: Iterable<File>) =>
-  Array.from(files).filter((file) => file.type.startsWith("image/"));
-
 /**
  * Mirrors the composer's ⌘S stash: the entry is written first so a closed tab cannot lose the
- * text, then images are re-encoded to fit the localStorage budget the stash shares.
+ * text, then images are re-encoded to fit the localStorage budget the stash shares. Other files
+ * are already on the server, so the entry keeps their upload references like a composer stash.
  */
-async function stashFromPanel(prompt: string, images: ReadonlyArray<DraftImage>) {
+async function stashFromPanel(
+  prompt: string,
+  images: ReadonlyArray<DraftImage>,
+  files: ReadonlyArray<PersistedComposerFileAttachment>,
+) {
   const store = usePromptStashStore.getState();
   const entryId = randomUUID();
   const { evicted, written } = store.stashEntry({
@@ -43,6 +77,7 @@ async function stashFromPanel(prompt: string, images: ReadonlyArray<DraftImage>)
     createdAt: new Date().toISOString(),
     prompt,
     attachments: [],
+    ...(files.length > 0 ? { files } : {}),
     droppedImageNames: [],
     unreadableImageNames: [],
     pendingImageCount: images.length,
@@ -90,30 +125,96 @@ async function stashFromPanel(prompt: string, images: ReadonlyArray<DraftImage>)
   return true;
 }
 
-function PromptsComposer() {
+function PromptsComposer(props: { environmentId: EnvironmentId }) {
+  const { environmentId } = props;
+  const { resolvedTheme } = useTheme();
+  const serverConfig = useAtomValue(environmentServerConfigsAtom).get(environmentId) ?? null;
+  const uploadsById = useAttachmentUploadStore((state) => state.uploadsByImageId);
   const [prompt, setPrompt] = useState("");
   const [images, setImages] = useState<DraftImage[]>([]);
+  const [files, setFiles] = useState<ComposerFileAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imagesRef = useRef(images);
+  const filesRef = useRef(files);
   useEffect(() => {
     imagesRef.current = images;
-  }, [images]);
+    filesRef.current = files;
+  }, [images, files]);
   useEffect(
     () => () => {
       for (const image of imagesRef.current) URL.revokeObjectURL(image.previewUrl);
+      // Unsaved uploads belong to no draft or stash entry, so nothing else would release them.
+      for (const file of filesRef.current) releaseAttachmentUpload(file.id);
     },
     [],
   );
 
-  const addImages = (files: ReadonlyArray<File>) => {
-    if (files.length === 0) return;
-    setImages((current) => [
-      ...current,
-      ...files.map((file) => ({ id: randomUUID(), file, previewUrl: URL.createObjectURL(file) })),
-    ]);
+  const fileLimit = fileAttachmentStagingLimit({
+    attachmentUploadsCapabilityKnown: serverConfig !== null,
+    supportsAttachmentUploads: serverConfig?.environment.capabilities.attachmentUploads === true,
+    maxFileAttachmentBytes:
+      serverConfig?.environment.capabilities.fileAttachments?.maxUploadBytes ?? null,
+  });
+
+  // The same rules the composer applies, so anything saved here can be restored into it.
+  const addAttachments = (picked: ReadonlyArray<File>) => {
+    let slots = PROVIDER_SEND_TURN_MAX_ATTACHMENTS - images.length - files.length;
+    const nextImages: DraftImage[] = [];
+    const nextFiles: ComposerFileAttachment[] = [];
+    let error: string | null = null;
+    for (const file of picked) {
+      if (slots <= 0) {
+        error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
+        break;
+      }
+      const kind = classifyComposerAttachmentFile(file);
+      if (kind === "unsupported-image") {
+        error = `'${file.name}' is not a supported image type. Attach GIF, HEIC, HEIF, JPEG, PNG, or WebP images.`;
+        continue;
+      }
+      if (kind === "image") {
+        const image = normalizeComposerImageFileMimeType(file);
+        nextImages.push({ id: randomUUID(), file: image, previewUrl: URL.createObjectURL(image) });
+        slots -= 1;
+        continue;
+      }
+      if (fileLimit === null) {
+        error = "This server does not support file attachments.";
+        continue;
+      }
+      if (file.size <= 0) {
+        error = `'${file.name}' is empty or could not be read.`;
+        continue;
+      }
+      if (file.size > fileLimit) {
+        error = fileAttachmentTooLargeMessage(file.name, fileLimit);
+        continue;
+      }
+      const mimeType =
+        videoMimeType({ name: file.name, mimeType: file.type }) ??
+        (file.type || "application/octet-stream");
+      const attachmentFile =
+        file.type === mimeType
+          ? file
+          : new File([file], file.name, { type: mimeType, lastModified: file.lastModified });
+      const attachment: ComposerFileAttachment = {
+        type: "file",
+        id: randomUUID(),
+        name: attachmentFile.name || "file",
+        mimeType,
+        sizeBytes: attachmentFile.size,
+        file: attachmentFile,
+      };
+      startAttachmentUpload({ environmentId, image: attachment });
+      nextFiles.push(attachment);
+      slots -= 1;
+    }
+    if (error) toastManager.add({ type: "error", title: error });
+    if (nextImages.length > 0) setImages((current) => [...current, ...nextImages]);
+    if (nextFiles.length > 0) setFiles((current) => [...current, ...nextFiles]);
   };
 
   const removeImage = (id: string) => {
@@ -124,33 +225,62 @@ function PromptsComposer() {
     });
   };
 
-  const canSave = !isSaving && (prompt.trim().length > 0 || images.length > 0);
+  const removeFile = (id: string) => {
+    releaseAttachmentUpload(id);
+    setFiles((current) => current.filter((file) => file.id !== id));
+  };
+
+  const canSave = !isSaving && (prompt.trim().length > 0 || images.length > 0 || files.length > 0);
 
   const save = async () => {
     if (!canSave) return;
+    // A stash entry points at the server's copy of each file, so it needs every upload done.
+    const persistedFiles: PersistedComposerFileAttachment[] = [];
+    for (const file of files) {
+      const upload = readAttachmentUpload(file.id);
+      if (upload?.status !== "ready" || upload.environmentId !== environmentId) {
+        toastManager.add({
+          type: upload?.status === "failed" ? "error" : "info",
+          title:
+            upload?.status === "failed"
+              ? `'${file.name}' did not upload. Retry or remove it to save.`
+              : "Wait for file uploads before saving this prompt",
+        });
+        return;
+      }
+      persistedFiles.push({
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        attachmentId: upload.attachmentId,
+        environmentId,
+      });
+    }
     setIsSaving(true);
-    const saved = await stashFromPanel(prompt.trim(), images);
+    const saved = await stashFromPanel(prompt.trim(), images, persistedFiles);
     setIsSaving(false);
     if (!saved) return;
     for (const image of images) URL.revokeObjectURL(image.previewUrl);
     setPrompt("");
     setImages([]);
+    setFiles([]);
     textareaRef.current?.focus();
   };
 
   const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    const pasted = imageFilesOf(event.clipboardData.files);
+    const pasted = Array.from(event.clipboardData.files);
     if (pasted.length === 0) return;
     event.preventDefault();
-    addImages(pasted);
+    addAttachments(pasted);
   };
 
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     setIsDragOver(false);
-    const dropped = imageFilesOf(event.dataTransfer.files);
+    const dropped = Array.from(event.dataTransfer.files);
     if (dropped.length === 0) return;
     event.preventDefault();
-    addImages(dropped);
+    addAttachments(dropped);
   };
 
   const saveShortcut = isMacPlatform(navigator.platform) ? "⌘↵" : "Ctrl+↵";
@@ -199,11 +329,59 @@ function PromptsComposer() {
                   ))}
                 </div>
               ) : null}
+              {files.length > 0 ? (
+                <div className="mb-3 flex flex-col gap-1">
+                  {files.map((file) => {
+                    const upload = uploadsById[file.id];
+                    return (
+                      <div
+                        key={file.id}
+                        className="flex min-w-0 items-center gap-2 py-1 text-sm text-foreground"
+                      >
+                        <PierreEntryIcon pathValue={file.name} kind="file" theme={resolvedTheme} />
+                        <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                        <span className="shrink-0 text-xs text-secondary-label">
+                          {upload?.status === "uploading"
+                            ? formatAttachmentUploadProgress(upload.progress)
+                            : formatAttachmentSize(file.sizeBytes)}
+                        </span>
+                        {upload?.status === "failed" ? (
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <Button
+                                  variant="ghost"
+                                  size="icon-xs"
+                                  onClick={() =>
+                                    retryAttachmentUpload({ environmentId, image: file })
+                                  }
+                                  aria-label={`Retry upload for ${file.name}`}
+                                />
+                              }
+                            >
+                              <RefreshIcon />
+                            </TooltipTrigger>
+                            <TooltipPopup side="top">{upload.reason}</TooltipPopup>
+                          </Tooltip>
+                        ) : null}
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          onClick={() => removeFile(file.id)}
+                          aria-label={`Remove ${file.name}`}
+                        >
+                          <XIcon />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
               <textarea
                 ref={textareaRef}
                 value={prompt}
                 aria-label="New prompt"
-                placeholder="Write a follow-up for later, paste or drop images"
+                placeholder="Write a follow-up for later, paste or drop files"
                 className="-m-1 block field-sizing-content max-h-52 min-h-19.5 w-[calc(100%+0.5rem)] resize-none overflow-y-auto bg-transparent p-1 leading-relaxed whitespace-pre-wrap wrap-break-word text-foreground placeholder:text-placeholder focus:outline-none"
                 onChange={(event) => setPrompt(event.target.value)}
                 onPaste={onPaste}
@@ -219,11 +397,10 @@ function PromptsComposer() {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*"
                 multiple
                 hidden
                 onChange={(event) => {
-                  addImages(imageFilesOf(event.target.files ?? []));
+                  addAttachments(Array.from(event.target.files ?? []));
                   event.target.value = "";
                 }}
               />
@@ -231,16 +408,16 @@ function PromptsComposer() {
                 <TooltipTrigger
                   render={
                     <Button
-                      variant="ghost-muted"
+                      variant="ghost"
                       size="icon-sm"
-                      aria-label="Attach images"
+                      aria-label="Attach files"
                       onClick={() => fileInputRef.current?.click()}
                     />
                   }
                 >
-                  <ImagePlusIcon />
+                  <PaperclipIcon />
                 </TooltipTrigger>
-                <TooltipPopup side="top">Attach images</TooltipPopup>
+                <TooltipPopup side="top">Attach files</TooltipPopup>
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger
@@ -268,9 +445,11 @@ function PromptsComposer() {
 
 function PromptCard(props: {
   entry: PromptStashEntry;
+  theme: "light" | "dark";
   onAction: (entry: PromptStashEntry, action: PromptStashAction) => void;
 }) {
-  const { entry, onAction } = props;
+  const { entry, theme, onAction } = props;
+  const files = entry.files ?? [];
   const text = assistantCitationsToPlainText(entry.prompt).trim();
   const isSaving = (entry.pendingImageCount ?? 0) > 0;
   const missingImages = entry.droppedImageNames.length + (entry.unreadableImageNames?.length ?? 0);
@@ -291,6 +470,24 @@ function PromptCard(props: {
               alt={attachment.name}
               className="h-12 w-12 rounded-lg border border-border/80 bg-background object-cover"
             />
+          ))}
+        </div>
+      ) : null}
+      {files.length > 0 ? (
+        <div
+          className={cn(
+            "flex flex-col gap-1",
+            (text.length > 0 || entry.attachments.length > 0) && "mt-2.5",
+          )}
+        >
+          {files.map((file) => (
+            <div key={file.id} className="flex min-w-0 items-center gap-2 text-sm text-foreground">
+              <PierreEntryIcon pathValue={file.name} kind="file" theme={theme} />
+              <span className="min-w-0 flex-1 truncate">{file.name}</span>
+              <span className="shrink-0 text-xs text-secondary-label">
+                {formatAttachmentSize(file.sizeBytes)}
+              </span>
+            </div>
           ))}
         </div>
       ) : null}
@@ -340,8 +537,12 @@ function PromptCard(props: {
 }
 
 /** Follow-up prompts kept beside the thread; shares its entries with the composer's ⌘S stash. */
-export function PromptsPanel(props: { composerDraftTarget: ScopedThreadRef | DraftId }) {
-  const { composerDraftTarget } = props;
+export function PromptsPanel(props: {
+  composerDraftTarget: ScopedThreadRef | DraftId;
+  environmentId: EnvironmentId;
+}) {
+  const { composerDraftTarget, environmentId } = props;
+  const { resolvedTheme } = useTheme();
   const entries = usePromptStashStore((state) => state.entries);
 
   const onAction = (entry: PromptStashEntry, action: PromptStashAction) => {
@@ -355,7 +556,7 @@ export function PromptsPanel(props: { composerDraftTarget: ScopedThreadRef | Dra
   return (
     <ScrollArea className="min-h-0 flex-1">
       <div className="flex flex-col gap-4 p-3">
-        <PromptsComposer />
+        <PromptsComposer environmentId={environmentId} />
         {entries.length === 0 ? (
           <Empty size="compact">
             <EmptyHeader>
@@ -371,7 +572,7 @@ export function PromptsPanel(props: { composerDraftTarget: ScopedThreadRef | Dra
         ) : (
           <ul role="list" aria-label="Saved prompts" className="flex flex-col gap-2">
             {entries.map((entry) => (
-              <PromptCard key={entry.id} entry={entry} onAction={onAction} />
+              <PromptCard key={entry.id} entry={entry} theme={resolvedTheme} onAction={onAction} />
             ))}
           </ul>
         )}

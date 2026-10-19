@@ -184,7 +184,10 @@ export function RightPanelSurfaceContent(props: {
     case "prompts":
       return (
         <Suspense fallback={null}>
-          <PromptsPanel composerDraftTarget={props.composerDraftTarget} />
+          <PromptsPanel
+            composerDraftTarget={props.composerDraftTarget}
+            environmentId={props.environmentId}
+          />
         </Suspense>
       );
     case "files":
