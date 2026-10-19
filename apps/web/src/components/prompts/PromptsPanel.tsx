@@ -382,7 +382,13 @@ function PromptsComposer(props: { environmentId: EnvironmentId }) {
                 value={prompt}
                 aria-label="New prompt"
                 placeholder="Write a follow-up for later, paste or drop files"
-                className="-m-1 block field-sizing-content max-h-52 min-h-19.5 w-[calc(100%+0.5rem)] resize-none overflow-y-auto bg-transparent p-1 leading-relaxed whitespace-pre-wrap wrap-break-word text-foreground placeholder:text-placeholder focus:outline-none"
+                className={cn(
+                  "-m-1 block field-sizing-content max-h-52 min-h-19.5 w-[calc(100%+0.5rem)] resize-none overflow-y-auto bg-transparent p-1 whitespace-pre-wrap wrap-break-word text-foreground placeholder:text-placeholder/75 focus:outline-none",
+                  // The composer's editor reads these appearance settings; matching them keeps both boxes the same size.
+                  "font-(family-name:--font-composer,var(--font-sans)) text-(length:--font-size-prompt,var(--text-sm)) max-sm:pointer-coarse:text-(length:--font-size-prompt-touch)",
+                  // After the size: class merging drops a line height that precedes a font size.
+                  "leading-relaxed",
+                )}
                 onChange={(event) => setPrompt(event.target.value)}
                 onPaste={onPaste}
                 onKeyDown={(event) => {
